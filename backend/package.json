@@ -1,0 +1,22 @@
+{
+  "name": "goal-dashboard-backend",
+  "version": "1.0.0",
+  "description": "Backend for Goal Dashboard - Express.js + Neon PostgreSQL",
+  "main": "index.js",
+  "scripts": {
+    "dev": "node --watch index.js",
+    "start": "node index.js",
+    "db:init": "node lib/db-init.js"
+  },
+  "dependencies": {
+    "@neondatabase/serverless": "^0.9.0",
+    "bcryptjs": "^2.4.3",
+    "cors": "^2.8.5",
+    "dotenv": "^17.4.2",
+    "express": "^4.18.2",
+    "jsonwebtoken": "^9.0.2",
+    "nodemailer": "^6.9.7",
+    "pdfkit": "^0.18.0",
+    "uuid": "^9.0.0"
+  }
+}
