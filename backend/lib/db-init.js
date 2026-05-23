@@ -1,27 +1,35 @@
 // Run once: node lib/db-init.js
-// This creates all tables in your Neon database.
+// This creates all tables in your Supabase database.
 
 require("dotenv").config({ path: require("path").resolve(__dirname, "../.env") });
-const sql = require("./db");
+const { Client } = require("pg");
 
 async function initDatabase() {
-  console.log("Initializing database...");
+  console.log("Initializing database connection to Supabase...");
+
+  // Konfigurasi koneksi menggunakan Client dari 'pg'
+  const client = new Client({
+    connectionString: process.env.DATABASE_URL,
+    ssl: { rejectUnauthorized: false } // Supabase membutuhkan koneksi SSL
+  });
 
   try {
-    await sql`CREATE EXTENSION IF NOT EXISTS "pgcrypto"`;
+    await client.connect();
+    await client.query(`CREATE EXTENSION IF NOT EXISTS "pgcrypto"`);
 
-    await sql`
+    await client.query(`
       CREATE TABLE IF NOT EXISTS users (
         id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
         email TEXT UNIQUE NOT NULL,
         password_hash TEXT NOT NULL,
         name TEXT,
-        created_at TIMESTAMPTZ DEFAULT now()
+        created_at TIMESTAMPTZ DEFAULT now(),
+        deleted_at TIMESTAMPTZ
       )
-    `;
+    `);
     console.log("Table ready: users");
 
-    await sql`
+    await client.query(`
       CREATE TABLE IF NOT EXISTS sessions (
         id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
         user_id UUID REFERENCES users(id) ON DELETE CASCADE,
@@ -29,10 +37,10 @@ async function initDatabase() {
         expires_at TIMESTAMPTZ NOT NULL,
         created_at TIMESTAMPTZ DEFAULT now()
       )
-    `;
+    `);
     console.log("Table ready: sessions");
 
-    await sql`
+    await client.query(`
       CREATE TABLE IF NOT EXISTS goals (
         id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
         user_id UUID REFERENCES users(id) ON DELETE CASCADE,
@@ -42,12 +50,13 @@ async function initDatabase() {
         priority TEXT DEFAULT 'medium',
         progress NUMERIC(5,2) DEFAULT 0,
         created_at TIMESTAMPTZ DEFAULT now(),
-        updated_at TIMESTAMPTZ DEFAULT now()
+        updated_at TIMESTAMPTZ DEFAULT now(),
+        deleted_at TIMESTAMPTZ
       )
-    `;
+    `);
     console.log("Table ready: goals");
 
-    await sql`
+    await client.query(`
       CREATE TABLE IF NOT EXISTS milestones (
         id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
         goal_id UUID REFERENCES goals(id) ON DELETE CASCADE,
@@ -56,10 +65,10 @@ async function initDatabase() {
         created_at TIMESTAMPTZ DEFAULT now(),
         updated_at TIMESTAMPTZ DEFAULT now()
       )
-    `;
+    `);
     console.log("Table ready: milestones");
 
-    await sql`
+    await client.query(`
       CREATE TABLE IF NOT EXISTS reminders (
         id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
         goal_id UUID REFERENCES goals(id) ON DELETE CASCADE,
@@ -67,20 +76,20 @@ async function initDatabase() {
         sent BOOLEAN DEFAULT false,
         created_at TIMESTAMPTZ DEFAULT now()
       )
-    `;
+    `);
     console.log("Table ready: reminders");
 
-    await sql`
+    await client.query(`
       CREATE TABLE IF NOT EXISTS activities (
         id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
         user_id UUID REFERENCES users(id) ON DELETE CASCADE,
         description TEXT NOT NULL,
         created_at TIMESTAMPTZ DEFAULT now()
       )
-    `;
+    `);
     console.log("Table ready: activities");
 
-    await sql`
+    await client.query(`
       CREATE TABLE IF NOT EXISTS team_members (
         id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
         user_id UUID REFERENCES users(id) ON DELETE CASCADE,
@@ -91,13 +100,16 @@ async function initDatabase() {
         created_at TIMESTAMPTZ DEFAULT now(),
         updated_at TIMESTAMPTZ DEFAULT now()
       )
-    `;
+    `);
     console.log("Table ready: team_members");
 
     console.log("Database initialized successfully.");
   } catch (err) {
     console.error("Error initializing database:", err.message);
     process.exit(1);
+  } finally {
+    // Selalu tutup koneksi setelah selesai
+    await client.end();
   }
 }
 
