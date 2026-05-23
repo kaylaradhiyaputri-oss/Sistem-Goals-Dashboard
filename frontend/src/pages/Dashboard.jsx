@@ -922,9 +922,22 @@ function GoalDetailView({ goalId, onBack, onUpdate }) {
                   onClick={() => handleToggle(ms)}
                   disabled={isBusy}
                   title={ms.is_done ? "Tandai belum selesai" : "Tandai selesai"}
-                  style={{ border: "none", cursor: isBusy ? "not-allowed" : "pointer" }}
+                  style={{
+                    width: 22,
+                    height: 22,
+                    flexShrink: 0,
+                    border: ms.is_done ? "2px solid #10b981" : "2px solid #cbd5e1",
+                    borderRadius: 6,
+                    background: ms.is_done ? "#10b981" : "#fff",
+                    display: "flex",
+                    alignItems: "center",
+                    justifyContent: "center",
+                    cursor: isBusy ? "not-allowed" : "pointer",
+                    padding: 0,
+                    transition: "all 0.2s ease"
+                  }}
                 >
-                  {ms.is_done && <Check size={12} strokeWidth={3} color="#10b981" />}
+                  {ms.is_done && <Check size={14} strokeWidth={4} color="#fff" />}
                 </button>
                 <div style={{ flex: 1 }}>
                   <div style={{
@@ -1756,9 +1769,22 @@ function TeamView({ goals, activities, onUpdate }) {
                         className={`milestone-check ${ms.is_done ? "done" : ""}`}
                         onClick={() => handleToggleMilestone(ms)}
                         disabled={isBusy}
-                        style={{ border: "none", cursor: isBusy ? "not-allowed" : "pointer" }}
+                        style={{
+                          width: 22,
+                          height: 22,
+                          flexShrink: 0,
+                          border: ms.is_done ? "2px solid #10b981" : "2px solid #cbd5e1",
+                          borderRadius: 6,
+                          background: ms.is_done ? "#10b981" : "#fff",
+                          display: "flex",
+                          alignItems: "center",
+                          justifyContent: "center",
+                          cursor: isBusy ? "not-allowed" : "pointer",
+                          padding: 0,
+                          transition: "all 0.2s ease"
+                        }}
                       >
-                        {ms.is_done && <Check size={12} strokeWidth={3} color="#10b981" />}
+                        {ms.is_done && <Check size={14} strokeWidth={4} color="#fff" />}
                       </button>
 
                       <div style={{ flex: 1, minWidth: 0 }}>
