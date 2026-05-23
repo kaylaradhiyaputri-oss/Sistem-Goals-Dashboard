@@ -1,5 +1,5 @@
 const express = require("express");
-const sql = require("../lib/db");
+const pool = require("../lib/db"); // Diubah dari sql menjadi pool
 const { authMiddleware } = require("../middleware/auth");
 
 const router = express.Router();
@@ -9,19 +9,21 @@ router.use(authMiddleware);
 // GET /api/goals - Menampilkan goals untuk dashboard utama
 router.get("/", async (req, res) => {
   try {
-    const goals = await sql`
+    // Parameter: $1 = req.user.email, $2 = req.user.id
+    // Soft Delete: Menambahkan filter 'g.deleted_at IS NULL'
+    const goalsResult = await pool.query(`
       SELECT
         g.*,
         -- Total milestone projek
         COUNT(m.id) AS total_milestones,
         COUNT(m.id) FILTER (WHERE m.is_done = true) AS done_milestones,
         
-        -- Milestone personal (jika individu, semua milestone. jika kelompok, hanya yang ditugaskan ke user ini)
+        -- Milestone personal
         COUNT(m.id) FILTER (
-          WHERE g.type = 'individu' OR m.assignee_email = ${req.user.email} OR m.assignee_email IS NULL OR m.assignee_email = ''
+          WHERE g.type = 'individu' OR m.assignee_email = $1 OR m.assignee_email IS NULL OR m.assignee_email = ''
         ) AS personal_total_milestones,
         COUNT(m.id) FILTER (
-          WHERE m.is_done = true AND (g.type = 'individu' OR m.assignee_email = ${req.user.email} OR m.assignee_email IS NULL OR m.assignee_email = '')
+          WHERE m.is_done = true AND (g.type = 'individu' OR m.assignee_email = $1 OR m.assignee_email IS NULL OR m.assignee_email = '')
         ) AS personal_done_milestones,
         
         -- Progres Projek Total
@@ -32,10 +34,12 @@ router.get("/", async (req, res) => {
         ) AS project_progress
       FROM goals g
       LEFT JOIN milestones m ON m.goal_id = g.id
-      WHERE g.user_id = ${req.user.id}
+      WHERE g.user_id = $2 AND g.deleted_at IS NULL
       GROUP BY g.id
       ORDER BY g.created_at DESC
-    `;
+    `, [req.user.email, req.user.id]);
+
+    const goals = goalsResult.rows;
 
     const mappedGoals = goals.map((g) => {
       const personalTotal = parseInt(g.personal_total_milestones);
@@ -52,7 +56,6 @@ router.get("/", async (req, res) => {
         type: g.type || "individu",
         created_at: g.created_at,
         updated_at: g.updated_at,
-        // Override progress default dengan personal progress agar dashboard utama murni
         progress: personalProgress,
         personal_progress: personalProgress,
         project_progress: parseFloat(g.project_progress),
@@ -73,24 +76,25 @@ router.get("/", async (req, res) => {
 // GET /api/goals/:id - Detail goal
 router.get("/:id", async (req, res) => {
   try {
-    const [goal] = await sql`
-      SELECT * FROM goals
-      WHERE id = ${req.params.id} AND user_id = ${req.user.id}
-    `;
+    const goalResult = await pool.query(
+      'SELECT * FROM goals WHERE id = $1 AND user_id = $2 AND deleted_at IS NULL',
+      [req.params.id, req.user.id]
+    );
+    const goal = goalResult.rows[0];
 
     if (!goal) return res.status(404).json({ error: "Goal tidak ditemukan." });
 
-    const milestones = await sql`
-      SELECT * FROM milestones
-      WHERE goal_id = ${req.params.id}
-      ORDER BY created_at ASC
-    `;
+    const milestonesResult = await pool.query(
+      'SELECT * FROM milestones WHERE goal_id = $1 ORDER BY created_at ASC',
+      [req.params.id]
+    );
+    const milestones = milestonesResult.rows;
 
-    const members = await sql`
-      SELECT * FROM goal_members
-      WHERE goal_id = ${req.params.id}
-      ORDER BY created_at ASC
-    `;
+    const membersResult = await pool.query(
+      'SELECT * FROM goal_members WHERE goal_id = $1 AND deleted_at IS NULL ORDER BY created_at ASC',
+      [req.params.id]
+    );
+    const members = membersResult.rows;
 
     // Hitung progres
     const total = milestones.length;
@@ -108,7 +112,7 @@ router.get("/:id", async (req, res) => {
       goal: {
         ...goal,
         type: goal.type || "individu",
-        progress: personalProgress, // Default untuk personal view
+        progress: personalProgress, 
         personal_progress: personalProgress,
         project_progress: projectProgress,
       },
@@ -121,7 +125,7 @@ router.get("/:id", async (req, res) => {
   }
 });
 
-// POST /api/goals - Membuat goal baru (Individu / Kelompok)
+// POST /api/goals - Membuat goal baru
 router.post("/", async (req, res) => {
   const { title, description, deadline, priority = "medium", type = "individu", members = [], milestones = [] } = req.body;
   const cleanTitle = title?.trim();
@@ -131,14 +135,16 @@ router.post("/", async (req, res) => {
   }
 
   try {
-    const [recentDuplicate] = await sql`
+    const dupResult = await pool.query(`
       SELECT * FROM goals
-      WHERE user_id = ${req.user.id}
-        AND lower(title) = lower(${cleanTitle})
+      WHERE user_id = $1
+        AND lower(title) = lower($2)
         AND created_at > now() - interval '5 seconds'
       ORDER BY created_at DESC
       LIMIT 1
-    `;
+    `, [req.user.id, cleanTitle]);
+    
+    const recentDuplicate = dupResult.rows[0];
 
     if (recentDuplicate) {
       return res.status(200).json({
@@ -149,28 +155,30 @@ router.post("/", async (req, res) => {
       });
     }
 
-    const [goal] = await sql`
+    const goalResult = await pool.query(`
       INSERT INTO goals (user_id, title, description, deadline, priority, type)
-      VALUES (${req.user.id}, ${cleanTitle}, ${description?.trim() || null}, ${deadline || null}, ${priority}, ${type})
+      VALUES ($1, $2, $3, $4, $5, $6)
       RETURNING *
-    `;
+    `, [req.user.id, cleanTitle, description?.trim() || null, deadline || null, priority, type]);
+    
+    const goal = goalResult.rows[0];
 
-    // Simpan anggota tim projek (jika bertipe kelompok)
+    // Simpan anggota tim
     const savedMembers = [];
     if (type === "kelompok" && Array.isArray(members)) {
       for (const m of members) {
         if (m.name && m.email) {
-          const [savedMem] = await sql`
+          const memResult = await pool.query(`
             INSERT INTO goal_members (goal_id, name, email, role)
-            VALUES (${goal.id}, ${m.name.trim()}, ${m.email.trim().toLowerCase()}, ${m.role?.trim() || null})
+            VALUES ($1, $2, $3, $4)
             RETURNING *
-          `;
-          savedMembers.push(savedMem);
+          `, [goal.id, m.name.trim(), m.email.trim().toLowerCase(), m.role?.trim() || null]);
+          savedMembers.push(memResult.rows[0]);
         }
       }
     }
 
-    // Simpan milestones beserta penugasan
+    // Simpan milestones
     const savedMilestones = [];
     if (Array.isArray(milestones)) {
       const cleanMilestones = milestones
@@ -182,31 +190,29 @@ router.post("/", async (req, res) => {
         .filter((ms) => ms.title);
 
       for (const ms of cleanMilestones) {
-        const [saved] = await sql`
+        const msResult = await pool.query(`
           INSERT INTO milestones (goal_id, title, assignee_name, assignee_email)
-          VALUES (${goal.id}, ${ms.title}, ${ms.assignee_name}, ${ms.assignee_email})
+          VALUES ($1, $2, $3, $4)
           RETURNING *
-        `;
-        savedMilestones.push(saved);
+        `, [goal.id, ms.title, ms.assignee_name, ms.assignee_email]);
+        savedMilestones.push(msResult.rows[0]);
       }
     }
 
     if (deadline) {
       const remindAt = new Date(deadline);
       remindAt.setDate(remindAt.getDate() - 1);
-      await sql`
-        INSERT INTO reminders (goal_id, remind_at)
-        VALUES (${goal.id}, ${remindAt.toISOString()})
-      `;
+      await pool.query(
+        'INSERT INTO reminders (goal_id, remind_at) VALUES ($1, $2)',
+        [goal.id, remindAt.toISOString()]
+      );
     }
 
-    await sql`
-      INSERT INTO activities (user_id, description)
-      VALUES (${req.user.id}, ${
-        `Anda membuat goal ${type === "kelompok" ? "kelompok" : "individu"} baru: "${cleanTitle}"` +
-        (priority ? ` dengan prioritas ${priority}` : "")
-      })
-    `;
+    const descStr = `Anda membuat goal ${type === "kelompok" ? "kelompok" : "individu"} baru: "${cleanTitle}"` + (priority ? ` dengan prioritas ${priority}` : "");
+    await pool.query(
+      'INSERT INTO activities (user_id, description) VALUES ($1, $2)',
+      [req.user.id, descStr]
+    );
 
     res.status(201).json({
       message: "Goal berhasil dibuat.",
@@ -215,6 +221,7 @@ router.post("/", async (req, res) => {
       members: savedMembers,
     });
 
+    // Email Notification
     if (process.env.SMTP_HOST && process.env.SMTP_USER && process.env.SMTP_PASS) {
       setImmediate(async () => {
         try {
@@ -223,28 +230,22 @@ router.post("/", async (req, res) => {
             host: process.env.SMTP_HOST,
             port: parseInt(process.env.SMTP_PORT || "587"),
             secure: process.env.SMTP_PORT === "465",
-            auth: {
-              user: process.env.SMTP_USER,
-              pass: process.env.SMTP_PASS,
-            },
-            connectionTimeout: 4000,
-            greetingTimeout: 4000,
-            socketTimeout: 6000,
+            auth: { user: process.env.SMTP_USER, pass: process.env.SMTP_PASS },
           });
 
-          const [user] = await sql`SELECT email, name FROM users WHERE id = ${req.user.id}`;
+          const userResult = await pool.query('SELECT email, name FROM users WHERE id = $1', [req.user.id]);
+          const user = userResult.rows[0];
+          
           if (!user) return;
 
           await transporter.sendMail({
             from: `"GoalProgress" <${process.env.SMTP_USER}>`,
             to: user.email,
             subject: `Goal Baru Dibuat: ${cleanTitle}`,
-            text: `Halo ${user.name || "Pengguna"},\n\nGoal baru Anda "${cleanTitle}" (${
-              type === "kelompok" ? "Kelompok" : "Individu"
-            }) berhasil dibuat dengan deadline ${deadline || "tidak ada"}.\n\nTetap semangat meraih target Anda!\n\nSalam,\nGoalProgress Team`,
+            text: `Halo ${user.name || "Pengguna"},\n\nGoal baru Anda "${cleanTitle}" berhasil dibuat.\n\nTetap semangat meraih target Anda!\n\nSalam,\nGoalProgress Team`,
           });
         } catch (emailErr) {
-          console.error("Gagal mengirim email notifikasi:", emailErr.message);
+          console.error("Gagal mengirim email:", emailErr.message);
         }
       });
     }
@@ -260,18 +261,19 @@ router.put("/:id", async (req, res) => {
   const cleanTitle = title?.trim();
 
   try {
-    const [goal] = await sql`
+    const updateResult = await pool.query(`
       UPDATE goals
       SET
-        title = COALESCE(${cleanTitle || null}, title),
-        description = COALESCE(${description?.trim() || null}, description),
-        deadline = COALESCE(${deadline}, deadline),
-        priority = COALESCE(${priority}, priority),
+        title = COALESCE($1, title),
+        description = COALESCE($2, description),
+        deadline = COALESCE($3, deadline),
+        priority = COALESCE($4, priority),
         updated_at = now()
-      WHERE id = ${req.params.id} AND user_id = ${req.user.id}
+      WHERE id = $5 AND user_id = $6 AND deleted_at IS NULL
       RETURNING *
-    `;
+    `, [cleanTitle || null, description?.trim() || null, deadline || null, priority || null, req.params.id, req.user.id]);
 
+    const goal = updateResult.rows[0];
     if (!goal) return res.status(404).json({ error: "Goal tidak ditemukan." });
 
     res.json({ message: "Goal berhasil diupdate.", goal });
@@ -281,64 +283,68 @@ router.put("/:id", async (req, res) => {
   }
 });
 
-// POST /api/goals/:id/members - Menambah anggota tim baru ke goal kelompok
+// POST /api/goals/:id/members - Menambah anggota tim baru
 router.post("/:id/members", async (req, res) => {
   const { name, email, role } = req.body;
   if (!name || !email) return res.status(400).json({ error: "Nama dan email wajib diisi." });
 
   try {
-    // Verifikasi goal milik user
-    const [goal] = await sql`
-      SELECT id FROM goals WHERE id = ${req.params.id} AND user_id = ${req.user.id}
-    `;
-    if (!goal) return res.status(404).json({ error: "Goal tidak ditemukan." });
+    const goalResult = await pool.query(
+      'SELECT id FROM goals WHERE id = $1 AND user_id = $2 AND deleted_at IS NULL',
+      [req.params.id, req.user.id]
+    );
+    if (goalResult.rows.length === 0) return res.status(404).json({ error: "Goal tidak ditemukan." });
 
-    const [member] = await sql`
+    const memResult = await pool.query(`
       INSERT INTO goal_members (goal_id, name, email, role)
-      VALUES (${req.params.id}, ${name.trim()}, ${email.trim().toLowerCase()}, ${role?.trim() || null})
+      VALUES ($1, $2, $3, $4)
       RETURNING *
-    `;
+    `, [req.params.id, name.trim(), email.trim().toLowerCase(), role?.trim() || null]);
 
-    res.status(201).json(member);
+    res.status(201).json(memResult.rows[0]);
   } catch (err) {
-    console.error("Gagal menambahkan anggota ke goal:", err);
-    res.status(500).json({ error: "Gagal menambahkan anggota ke goal." });
+    console.error("Gagal menambahkan anggota:", err);
+    res.status(500).json({ error: "Gagal menambahkan anggota." });
   }
 });
 
-// DELETE /api/goals/:id/members/:memberId - Menghapus anggota tim dari goal kelompok
+// DELETE /api/goals/:id/members/:memberId - Menghapus anggota tim
 router.delete("/:id/members/:memberId", async (req, res) => {
   try {
-    // Verifikasi goal milik user
-    const [goal] = await sql`
-      SELECT id FROM goals WHERE id = ${req.params.id} AND user_id = ${req.user.id}
-    `;
-    if (!goal) return res.status(404).json({ error: "Goal tidak ditemukan." });
+    const goalResult = await pool.query(
+      'SELECT id FROM goals WHERE id = $1 AND user_id = $2 AND deleted_at IS NULL',
+      [req.params.id, req.user.id]
+    );
+    if (goalResult.rows.length === 0) return res.status(404).json({ error: "Goal tidak ditemukan." });
 
-    await sql`
-      DELETE FROM goal_members
-      WHERE id = ${req.params.memberId} AND goal_id = ${req.params.id}
-    `;
+    // Hapus permanen anggota atau bisa di-soft delete juga. Disini kita hapus permanen agar sederhana
+    await pool.query(
+      'DELETE FROM goal_members WHERE id = $1 AND goal_id = $2',
+      [req.params.memberId, req.params.id]
+    );
 
-    res.json({ message: "Anggota berhasil dihapus dari goal." });
+    res.json({ message: "Anggota berhasil dihapus." });
   } catch (err) {
-    console.error("Gagal menghapus anggota dari goal:", err);
+    console.error("Gagal menghapus anggota:", err);
     res.status(500).json({ error: "Gagal menghapus anggota." });
   }
 });
 
-// DELETE /api/goals/:id - Menghapus goal
+// DELETE /api/goals/:id - Menghapus goal (SOFT DELETE IMPLEMENTATION)
 router.delete("/:id", async (req, res) => {
   try {
-    const [goal] = await sql`
-      DELETE FROM goals
-      WHERE id = ${req.params.id} AND user_id = ${req.user.id}
+    // Sesuai dokumen D3, data tidak di-DELETE permanen melainkan ditandai deleted_at
+    const deleteResult = await pool.query(`
+      UPDATE goals 
+      SET deleted_at = now() 
+      WHERE id = $1 AND user_id = $2 AND deleted_at IS NULL
       RETURNING *
-    `;
+    `, [req.params.id, req.user.id]);
 
+    const goal = deleteResult.rows[0];
     if (!goal) return res.status(404).json({ error: "Goal tidak ditemukan." });
 
-    res.json({ message: "Goal berhasil dihapus." });
+    res.json({ message: "Goal berhasil dihapus (Soft Delete)." });
   } catch (err) {
     console.error("Gagal menghapus goal:", err);
     res.status(500).json({ error: "Gagal menghapus goal." });

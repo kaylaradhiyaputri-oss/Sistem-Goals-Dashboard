@@ -1,5 +1,5 @@
 const express = require("express");
-const sql = require("../lib/db");
+const pool = require("../lib/db"); // Ubah sql menjadi pool
 const { authMiddleware } = require("../middleware/auth");
 
 const router = express.Router();
@@ -13,10 +13,15 @@ router.get("/", async (req, res) => {
 
   try {
     // Ambil data profil user
-    const [user] = await sql`SELECT name, email FROM users WHERE id = ${req.user.id}`;
+    const userResult = await pool.query(
+      'SELECT name, email FROM users WHERE id = $1',
+      [req.user.id]
+    );
+    const user = userResult.rows[0];
 
     // "ambil semua data goal" dari sequence diagram
-    const goals = await sql`
+    // Perhatikan penggunaan $1 untuk parameter req.user.id
+    const goalsResult = await pool.query(`
       SELECT
         g.id,
         g.title,
@@ -34,10 +39,13 @@ router.get("/", async (req, res) => {
         ) FILTER (WHERE m.id IS NOT NULL) AS milestones
       FROM goals g
       LEFT JOIN milestones m ON m.goal_id = g.id
-      WHERE g.user_id = ${req.user.id}
+      WHERE g.user_id = $1
       GROUP BY g.id
       ORDER BY g.created_at DESC
-    `;
+    `, [req.user.id]);
+    
+    // Ambil array datanya
+    const goals = goalsResult.rows;
 
     if (format === "csv") {
       // Buat CSV sederhana

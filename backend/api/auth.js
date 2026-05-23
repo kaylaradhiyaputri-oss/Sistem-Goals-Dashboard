@@ -1,7 +1,7 @@
 const express = require("express");
 const bcrypt = require("bcryptjs");
 const jwt = require("jsonwebtoken");
-const sql = require("../lib/db");
+const pool = require("../lib/db"); // Diubah menjadi pool
 const { JWT_SECRET } = require("../middleware/auth");
 
 const router = express.Router();
@@ -16,18 +16,26 @@ router.post("/register", async (req, res) => {
 
   try {
     // Cek apakah email sudah terdaftar
-    const existing = await sql`SELECT id FROM users WHERE email = ${email}`;
-    if (existing.length > 0) {
+    const existing = await pool.query(
+      'SELECT id FROM users WHERE email = $1',
+      [email]
+    );
+    
+    if (existing.rows.length > 0) {
       return res.status(409).json({ error: "Email sudah terdaftar." });
     }
 
     const password_hash = await bcrypt.hash(password, 10);
 
-    const [user] = await sql`
-      INSERT INTO users (email, password_hash, name)
-      VALUES (${email}, ${password_hash}, ${name || null})
-      RETURNING id, email, name, created_at
-    `;
+    // Insert user baru dan kembalikan data yang dibuat
+    const insertResult = await pool.query(
+      `INSERT INTO users (email, password_hash, name)
+       VALUES ($1, $2, $3)
+       RETURNING id, email, name, created_at`,
+      [email, password_hash, name || null]
+    );
+    
+    const user = insertResult.rows[0]; // Ambil data user dari array rows pertama
 
     const token = jwt.sign({ id: user.id, email: user.email }, JWT_SECRET, {
       expiresIn: "7d",
@@ -54,7 +62,12 @@ router.post("/login", async (req, res) => {
 
   try {
     // "cari data pengguna" - dari sequence diagram
-    const [user] = await sql`SELECT * FROM users WHERE email = ${email}`;
+    const userResult = await pool.query(
+      'SELECT * FROM users WHERE email = $1',
+      [email]
+    );
+    
+    const user = userResult.rows[0]; // Ambil data user dari array rows pertama
 
     if (!user) {
       return res.status(401).json({ error: "Email atau password salah." });

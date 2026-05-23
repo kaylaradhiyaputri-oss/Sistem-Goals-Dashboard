@@ -1,5 +1,5 @@
 const express = require("express");
-const sql = require("../lib/db");
+const pool = require("../lib/db"); // Diubah menjadi pool
 const { authMiddleware } = require("../middleware/auth");
 
 const router = express.Router();
@@ -16,22 +16,23 @@ router.patch("/:id/done", async (req, res) => {
 
   try {
     // 1. Dapatkan info user saat ini
-    const [user] = await sql`SELECT email, name FROM users WHERE id = ${req.user.id}`;
+    const userResult = await pool.query('SELECT email, name FROM users WHERE id = $1', [req.user.id]);
+    const user = userResult.rows[0];
     const userEmail = user?.email;
 
     // 2. Ambil milestone lama sebelum update (untuk tahu goal_id)
-    const [existingMilestone] = await sql`
+    const existingResult = await pool.query(`
       SELECT m.*, g.user_id AS goal_creator_id FROM milestones m
       JOIN goals g ON g.id = m.goal_id
-      WHERE m.id = ${req.params.id}
-    `;
+      WHERE m.id = $1
+    `, [req.params.id]);
+    const existingMilestone = existingResult.rows[0];
 
     if (!existingMilestone) {
       return res.status(404).json({ error: "Milestone tidak ditemukan." });
     }
 
     // 3. Verifikasi apakah user boleh mengupdate milestone ini
-    // Boleh jika pencipta goal, ATAU jika email penugasan cocok dengan email user
     const isCreator = existingMilestone.goal_creator_id === req.user.id;
     const isAssignee = existingMilestone.assignee_email && existingMilestone.assignee_email.toLowerCase() === userEmail.toLowerCase();
 
@@ -40,27 +41,26 @@ router.patch("/:id/done", async (req, res) => {
     }
 
     // 4. Update status milestone
-    const [milestone] = await sql`
+    const milestoneResult = await pool.query(`
       UPDATE milestones
-      SET is_done = ${is_done}, updated_at = now()
-      WHERE id = ${req.params.id}
+      SET is_done = $1, updated_at = now()
+      WHERE id = $2
       RETURNING *
-    `;
+    `, [is_done, req.params.id]);
+    const milestone = milestoneResult.rows[0];
 
-    const [goal] = await sql`
-      SELECT * FROM goals WHERE id = ${milestone.goal_id}
-    `;
+    const goalResult = await pool.query('SELECT * FROM goals WHERE id = $1', [milestone.goal_id]);
+    const goal = goalResult.rows[0];
 
     // 5. Ambil semua milestone untuk hitung progres
-    const milestones = await sql`
-      SELECT * FROM milestones WHERE goal_id = ${milestone.goal_id}
-    `;
+    const milestonesResult = await pool.query('SELECT * FROM milestones WHERE goal_id = $1', [milestone.goal_id]);
+    const milestones = milestonesResult.rows;
 
     const total = milestones.length;
     const done = milestones.filter((ms) => ms.is_done).length;
     const projectProgress = total > 0 ? Math.round((done / total) * 100 * 100) / 100 : 0;
 
-    // Hitung progres personal (milestone milik user ini / kosong)
+    // Hitung progres personal
     const personalMilestones = milestones.filter(
       (ms) => goal.type === "individu" || ms.assignee_email === userEmail || !ms.assignee_email || ms.assignee_email === ""
     );
@@ -68,25 +68,24 @@ router.patch("/:id/done", async (req, res) => {
     const personalDone = personalMilestones.filter((ms) => ms.is_done).length;
     const personalProgress = personalTotal > 0 ? Math.round((personalDone / personalTotal) * 100 * 100) / 100 : 0;
 
-    // 6. Simpan projectProgress di goals.progress ( database menyimpan progres global projek )
-    const [updatedGoal] = await sql`
+    // 6. Simpan projectProgress di goals.progress
+    const updatedGoalResult = await pool.query(`
       UPDATE goals
-      SET progress = ${projectProgress}, updated_at = now()
-      WHERE id = ${milestone.goal_id}
+      SET progress = $1, updated_at = now()
+      WHERE id = $2
       RETURNING *
-    `;
+    `, [projectProgress, milestone.goal_id]);
+    const updatedGoal = updatedGoalResult.rows[0];
 
     // Log ke tabel activities jika milestone diselesaikan (is_done === true)
     if (is_done) {
       try {
         const displayName = user?.name || user?.email || "Seorang pengguna";
-        await sql`
-          INSERT INTO activities (user_id, description)
-          VALUES (${req.user.id}, ${
-            `${displayName} menyelesaikan milestone "${milestone.title}"` +
-            (goal ? ` di goal "${goal.title}"` : "")
-          })
-        `;
+        const descText = `${displayName} menyelesaikan milestone "${milestone.title}"` + (goal ? ` di goal "${goal.title}"` : "");
+        await pool.query(
+          'INSERT INTO activities (user_id, description) VALUES ($1, $2)',
+          [req.user.id, descText]
+        );
       } catch (actErr) {
         console.error("⚠️ Gagal mencatat aktivitas milestone:", actErr.message);
       }
@@ -95,7 +94,7 @@ router.patch("/:id/done", async (req, res) => {
     res.json({
       message: "Milestone diupdate.",
       milestone,
-      progress: personalProgress, // Default untuk personal view di dashboard utama
+      progress: personalProgress, 
       project_progress: projectProgress,
       goal: {
         ...updatedGoal,
@@ -122,48 +121,52 @@ router.post("/", async (req, res) => {
 
   try {
     // Verifikasi goal milik user
-    const [goal] = await sql`
-      SELECT * FROM goals WHERE id = ${goal_id} AND user_id = ${req.user.id}
-    `;
+    const goalResult = await pool.query(
+      'SELECT * FROM goals WHERE id = $1 AND user_id = $2',
+      [goal_id, req.user.id]
+    );
+    const goal = goalResult.rows[0];
     if (!goal) return res.status(403).json({ error: "Akses ditolak." });
 
-    const [recentDuplicate] = await sql`
+    const dupResult = await pool.query(`
       SELECT * FROM milestones
-      WHERE goal_id = ${goal_id}
-        AND lower(title) = lower(${cleanTitle})
+      WHERE goal_id = $1
+        AND lower(title) = lower($2)
         AND created_at > now() - interval '5 seconds'
       ORDER BY created_at DESC
       LIMIT 1
-    `;
+    `, [goal_id, cleanTitle]);
+    const recentDuplicate = dupResult.rows[0];
 
     if (recentDuplicate) {
       return res.status(200).json({ message: "Milestone sudah tersimpan.", milestone: recentDuplicate });
     }
 
-    const [milestone] = await sql`
+    const milestoneResult = await pool.query(`
       INSERT INTO milestones (goal_id, title, assignee_name, assignee_email)
-      VALUES (${goal_id}, ${cleanTitle}, ${assignee_name || null}, ${assignee_email || null})
+      VALUES ($1, $2, $3, $4)
       RETURNING *
-    `;
+    `, [goal_id, cleanTitle, assignee_name || null, assignee_email || null]);
+    const milestone = milestoneResult.rows[0];
 
     // Recalculate progress for the goal
-    const milestones = await sql`
-      SELECT * FROM milestones WHERE goal_id = ${goal_id}
-    `;
+    const milestonesResult = await pool.query('SELECT * FROM milestones WHERE goal_id = $1', [goal_id]);
+    const milestones = milestonesResult.rows;
 
     const total = milestones.length;
     const done = milestones.filter((ms) => ms.is_done).length;
     const projectProgress = total > 0 ? Math.round((done / total) * 100 * 100) / 100 : 0;
 
-    await sql`
-      UPDATE goals
-      SET progress = ${projectProgress}, updated_at = now()
-      WHERE id = ${goal_id}
-    `;
+    await pool.query(
+      'UPDATE goals SET progress = $1, updated_at = now() WHERE id = $2',
+      [projectProgress, goal_id]
+    );
 
     // Hitung personal progress
-    const [currentUser] = await sql`SELECT email FROM users WHERE id = ${req.user.id}`;
+    const currentUserResult = await pool.query('SELECT email FROM users WHERE id = $1', [req.user.id]);
+    const currentUser = currentUserResult.rows[0];
     const userEmail = currentUser?.email;
+    
     const personalMilestones = milestones.filter(
       (ms) => goal.type === "individu" || ms.assignee_email === userEmail || !ms.assignee_email || ms.assignee_email === ""
     );
@@ -186,32 +189,35 @@ router.post("/", async (req, res) => {
 // DELETE /api/milestones/:id - Menghapus milestone
 router.delete("/:id", async (req, res) => {
   try {
-    const [milestone] = await sql`
+    const milestoneResult = await pool.query(`
       SELECT m.*, g.type AS goal_type FROM milestones m
       JOIN goals g ON g.id = m.goal_id
-      WHERE m.id = ${req.params.id} AND g.user_id = ${req.user.id}
-    `;
+      WHERE m.id = $1 AND g.user_id = $2
+    `, [req.params.id, req.user.id]);
+    const milestone = milestoneResult.rows[0];
+    
     if (!milestone) return res.status(404).json({ error: "Milestone tidak ditemukan." });
 
-    await sql`DELETE FROM milestones WHERE id = ${req.params.id}`;
+    // Hapus fisik untuk milestone (tidak perlu soft delete)
+    await pool.query('DELETE FROM milestones WHERE id = $1', [req.params.id]);
 
-    const milestones = await sql`
-      SELECT * FROM milestones WHERE goal_id = ${milestone.goal_id}
-    `;
+    const milestonesResult = await pool.query('SELECT * FROM milestones WHERE goal_id = $1', [milestone.goal_id]);
+    const milestones = milestonesResult.rows;
 
     const total = milestones.length;
     const done = milestones.filter((ms) => ms.is_done).length;
     const projectProgress = total > 0 ? Math.round((done / total) * 100 * 100) / 100 : 0;
 
-    await sql`
-      UPDATE goals
-      SET progress = ${projectProgress}, updated_at = now()
-      WHERE id = ${milestone.goal_id}
-    `;
+    await pool.query(
+      'UPDATE goals SET progress = $1, updated_at = now() WHERE id = $2',
+      [projectProgress, milestone.goal_id]
+    );
 
     // Hitung personal progress
-    const [currentUser] = await sql`SELECT email FROM users WHERE id = ${req.user.id}`;
+    const currentUserResult = await pool.query('SELECT email FROM users WHERE id = $1', [req.user.id]);
+    const currentUser = currentUserResult.rows[0];
     const userEmail = currentUser?.email;
+    
     const personalMilestones = milestones.filter(
       (ms) => milestone.goal_type === "individu" || ms.assignee_email === userEmail || !ms.assignee_email || ms.assignee_email === ""
     );
